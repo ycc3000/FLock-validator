@@ -424,22 +424,58 @@ class LLMJudgeValidationModule(BaseValidationModule):
         """
         Select evaluation model based on eval_args configuration
         """
-        eval_model_list = eval_args.get("eval_model_list", [])
+        eval_model_list = self._resolve_eval_models(eval_args)
 
         if eval_model_list:
-            # Check if all models in eval_model_list are available
-            available_eval_models = [
-                model for model in eval_model_list if model in self.available_models
-            ]
-
-            if len(available_eval_models) == len(eval_model_list):
-                selected_model = random.choice(eval_model_list)
-                logger.info(f"Using eval_model_list: selected {selected_model}")
-                return selected_model
+            selected_model = random.choice(eval_model_list)
+            logger.info(f"Using eval_model_list: selected {selected_model}")
+            return selected_model
 
         # random selection from available models
         selected_model = random.choice(self.available_models)
         return selected_model
+
+    def _resolve_eval_models(self, eval_args: dict) -> List[str]:
+        """
+        Resolve requested eval models against provider model list.
+        Supports alias forms like "<model>-low/high" by matching their parsed base model.
+        Returns requested model names (so extra params can still be derived later).
+        """
+        requested_models = eval_args.get("eval_model_list", []) if eval_args else []
+        if not requested_models:
+            return self.available_models
+
+        resolved_models = []
+        missing_models = []
+        for requested_model in requested_models:
+            if requested_model in self.available_models:
+                resolved_models.append(requested_model)
+                continue
+
+            parsed_model_name, _ = self._parse_model_name_to_params(requested_model)
+            if parsed_model_name in self.available_models:
+                logger.info(
+                    f"Resolved eval model '{requested_model}' to available model '{parsed_model_name}'."
+                )
+                resolved_models.append(requested_model)
+            else:
+                missing_models.append(requested_model)
+
+        # De-duplicate while preserving order
+        resolved_models = list(dict.fromkeys(resolved_models))
+
+        if missing_models:
+            logger.warning(
+                f"Requested eval models not available and will be skipped: {missing_models}"
+            )
+
+        if not resolved_models:
+            logger.warning(
+                "No requested eval models matched provider list, falling back to all available models."
+            )
+            return self.available_models
+
+        return resolved_models
 
     def _normalize_score(
         self, score: float, min_score: float = 0, max_score: float = 10.0
@@ -845,14 +881,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         conv_reasoning = []
 
         # Get available models for evaluation
-        eval_model_list = eval_args.get("eval_model_list", [])
-        available_eval_models = [
-            model for model in eval_model_list if model in self.available_models
-        ]
-
-        # If no models specified or available, use all available models
-        if not available_eval_models:
-            available_eval_models = self.available_models
+        available_eval_models = self._resolve_eval_models(eval_args)
 
         # Evaluate with each model for max_eval_try times
         for model_idx, model_name in enumerate(available_eval_models):
@@ -904,12 +933,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         eval_batch_size = self.config.eval_batch_size
 
         # Calculate total evaluation calls
-        eval_model_list = data.eval_args.get("eval_model_list", [])
-        available_eval_models = [
-            model for model in eval_model_list if model in self.available_models
-        ]
-        if not available_eval_models:
-            available_eval_models = self.available_models
+        available_eval_models = self._resolve_eval_models(data.eval_args)
 
         total_eval_calls = (
             len(all_conversations) * len(available_eval_models) * max_eval_try
